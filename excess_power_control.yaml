@@ -345,7 +345,7 @@ action:
             entity_id: !input water_heater_switch
             state: "on"
         sequence:
-          - service: switch.turn_on
+          - service: switch.turn_off
             target:
               entity_id: !input water_heater_switch
           - service: logbook.log
