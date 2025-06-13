@@ -195,111 +195,6 @@ blueprint:
           max: 30
           unit_of_measurement: "min"
 
-# Hilfssensoren für Berechnungen
-sensor:
-  - platform: template
-    sensors:
-      solar_surplus_calculation:
-        friendly_name: "Solar Überschuss Berechnung"
-        unit_of_measurement: "W"
-        value_template: >
-          {% set solar = states(solar_forecast_sensor) | float(0) %}
-          {% set consumption = states(house_consumption) | float(0) %}
-          {{ (solar - consumption) | round(0) }}
-      
-      # Gleitender Mittelwert für Solarleistung (vereinfacht)
-      solar_surplus_stable:
-        friendly_name: "Solar Überschuss (stabilisiert)"
-        unit_of_measurement: "W"
-        value_template: >
-          {% set current_surplus = states('sensor.solar_surplus_calculation') | float(0) %}
-          {% set previous_stable = states('sensor.solar_surplus_stable') | float(current_surplus) %}
-          {% set smoothing_factor = 0.3 %}
-          {{ ((current_surplus * smoothing_factor) + (previous_stable * (1 - smoothing_factor))) | round(0) }}
-        
-      water_heater_should_run:
-        friendly_name: "Boiler sollte laufen"
-        value_template: >
-          {% set current_temp = states(water_heater_temp) | float(0) %}
-          {% set min_temp = min_temp | float(45) %}
-          {% set max_temp = max_temp | float(60) %}
-          {% set battery_soc_current = states(battery_soc) | float(0) %}
-          {% set min_soc = min_battery_soc | float(80) %}
-          {% set solar_surplus = states('sensor.solar_surplus_stable') | float(0) %}
-          {% set min_surplus = min_solar_surplus | float(2000) %}
-          {% set heater_power_needed = heater_power | float(2000) %}
-          {% set current_time = now().strftime('%H:%M:%S') %}
-          {% set start = start_time %}
-          {% set end = end_time %}
-          {% set forecast_today = states(solar_forecast_today) | float(0) %}
-          {% set forecast_min = forecast_threshold | float(15) %}
-          {% set emergency_active = emergency_heating | bool(true) %}
-          {% set emergency_temp_threshold = emergency_temp | float(35) %}
-          
-          {# Laufzeit-Bedingungen prüfen #}
-          {% set boiler_state = states(water_heater_switch) %}
-          {% set last_changed = state_attr(water_heater_switch, 'last_changed') %}
-          {% set now_time = now() %}
-          {% set min_runtime_seconds = (min_runtime | float(30)) * 60 %}
-          {% set max_runtime_seconds = (max_runtime | float(90)) * 60 %}
-          {% set min_pause_seconds = (min_pause_time | float(15)) * 60 %}
-          
-          {% if last_changed %}
-            {% set time_since_change = (now_time - last_changed).total_seconds() %}
-          {% else %}
-            {% set time_since_change = 999999 %}
-          {% endif %}
-          
-          {# Wenn Boiler läuft - Mindestlaufzeit und Maximalzeit prüfen #}
-          {% if boiler_state == 'on' %}
-            {% set force_on_min_runtime = time_since_change < min_runtime_seconds %}
-            {% set force_off_max_runtime = time_since_change > max_runtime_seconds %}
-          {% else %}
-            {% set force_on_min_runtime = false %}
-            {% set force_off_max_runtime = false %}
-            {% set pause_time_ok = time_since_change > min_pause_seconds %}
-          {% endif %}
-          
-          {# Notfall-Heizung Bedingung #}
-          {% set emergency_needed = emergency_active and current_temp < emergency_temp_threshold %}
-          
-          {# Zeitfenster prüfen #}
-          {% set time_ok = start <= current_time <= end %}
-          
-          {# Temperatur-Bedingungen #}
-          {% set temp_needs_heating = current_temp < min_temp %}
-          {% set temp_not_too_hot = current_temp < max_temp %}
-          
-          {# Solar-Bedingungen (mit stabilisiertem Wert) #}
-          {% set solar_conditions_met = solar_surplus >= min_surplus and solar_surplus >= heater_power_needed %}
-          {% set battery_ok = battery_soc_current >= min_soc %}
-          {% set forecast_ok = forecast_today >= forecast_min %}
-          
-          {# Finale Entscheidung mit Laufzeit-Logik #}
-          {% if force_off_max_runtime %}
-            false
-          {% elif force_on_min_runtime %}
-            true
-          {% elif emergency_needed %}
-            {% if boiler_state == 'off' %}
-              {{ pause_time_ok }}
-            {% else %}
-              true
-            {% endif %}
-          {% elif temp_needs_heating and time_ok and temp_not_too_hot %}
-            {% if solar_conditions_met and battery_ok and forecast_ok %}
-              {% if boiler_state == 'off' %}
-                {{ pause_time_ok }}
-              {% else %}
-                true
-              {% endif %}
-            {% else %}
-              false
-            {% endif %}
-          {% else %}
-            false
-          {% endif %}
-
 # Hauptautomatisierung
 trigger:
   - platform: state
@@ -315,15 +210,107 @@ trigger:
 
 condition: []
 
+trigger:
+  - platform: state
+    entity_id: !input solar_forecast_sensor
+  - platform: state
+    entity_id: !input house_consumption
+  - platform: state
+    entity_id: !input battery_soc
+  - platform: state
+    entity_id: !input water_heater_temp
+  - platform: time_pattern
+    minutes: "/5"  # Überprüfung alle 5 Minuten
+
+condition: []
+
 action:
+  - variables:
+      # Alle Blueprint-Inputs als Variablen definieren
+      solar_forecast: !input solar_forecast_sensor
+      house_load: !input house_consumption
+      battery_level: !input battery_soc
+      water_temp: !input water_heater_temp
+      heater_switch: !input water_heater_switch
+      min_temperature: !input min_temp
+      max_temperature: !input max_temp
+      min_battery: !input min_battery_soc
+      min_surplus: !input min_solar_surplus
+      heater_watts: !input heater_power
+      start_hour: !input start_time
+      end_hour: !input end_time
+      forecast_threshold_kwh: !input forecast_threshold
+      emergency_enabled: !input emergency_heating
+      emergency_threshold: !input emergency_temp
+      minimum_runtime: !input min_runtime
+      maximum_runtime: !input max_runtime
+      minimum_pause: !input min_pause_time
+      
+      # Berechnungen
+      solar_surplus: >
+        {{ (states(solar_forecast) | float(0) - states(house_load) | float(0)) | round(0) }}
+      
+      # Laufzeit-Bedingungen
+      boiler_running: >
+        {{ states(heater_switch) == 'on' }}
+      
+      time_since_change: >
+        {% if state_attr(heater_switch, 'last_changed') %}
+          {{ (now() - state_attr(heater_switch, 'last_changed')).total_seconds() }}
+        {% else %}
+          999999
+        {% endif %}
+      
+      # Entscheidungslogik
+      force_off_max_time: >
+        {{ boiler_running and (time_since_change > (maximum_runtime * 60)) }}
+      
+      force_on_min_time: >
+        {{ boiler_running and (time_since_change < (minimum_runtime * 60)) }}
+      
+      pause_time_ok: >
+        {{ not boiler_running and (time_since_change > (minimum_pause * 60)) }}
+      
+      emergency_needed: >
+        {{ emergency_enabled and (states(water_temp) | float(0) < emergency_threshold) }}
+      
+      time_window_ok: >
+        {{ start_hour <= now().strftime('%H:%M:%S') <= end_hour }}
+      
+      temp_conditions: >
+        {{ (states(water_temp) | float(0) < min_temperature) and 
+           (states(water_temp) | float(0) < max_temperature) }}
+      
+      solar_conditions: >
+        {{ (solar_surplus >= min_surplus) and 
+           (solar_surplus >= heater_watts) and
+           (states(battery_level) | float(0) >= min_battery) and
+           (states(forecast_threshold_kwh) | float(0) >= forecast_threshold_kwh) }}
+      
+      should_run: >
+        {% if force_off_max_time %}
+          false
+        {% elif force_on_min_time %}
+          true
+        {% elif emergency_needed %}
+          {{ pause_time_ok if not boiler_running else true }}
+        {% elif temp_conditions and time_window_ok %}
+          {% if solar_conditions %}
+            {{ pause_time_ok if not boiler_running else true }}
+          {% else %}
+            false
+          {% endif %}
+        {% else %}
+          false
+        {% endif %}
+  
   - choose:
       # Boiler einschalten
       - conditions:
           - condition: template
-            value_template: "{{ states('sensor.water_heater_should_run') == 'true' }}"
-          - condition: state
-            entity_id: !input water_heater_switch
-            state: "off"
+            value_template: "{{ should_run == 'true' }}"
+          - condition: template
+            value_template: "{{ not boiler_running }}"
         sequence:
           - service: switch.turn_on
             target:
@@ -332,18 +319,19 @@ action:
             data:
               name: "Solar Water Heater Control"
               message: >
-                Boiler eingeschaltet - Temp: {{ states(water_heater_temp) }}°C, 
-                Solar: {{ states(solar_forecast_sensor) }}W, 
-                Verbrauch: {{ states(house_consumption) }}W, 
-                Batterie: {{ states(battery_soc) }}%
+                Boiler eingeschaltet - Temp: {{ states(water_temp) }}°C, 
+                Solar: {{ states(solar_forecast) }}W, 
+                Überschuss: {{ solar_surplus }}W,
+                Verbrauch: {{ states(house_load) }}W, 
+                Batterie: {{ states(battery_level) }}%,
+                Geplante Laufzeit: {{ minimum_runtime }}min
       
       # Boiler ausschalten
       - conditions:
           - condition: template
-            value_template: "{{ states('sensor.water_heater_should_run') == 'false' }}"
-          - condition: state
-            entity_id: !input water_heater_switch
-            state: "on"
+            value_template: "{{ should_run == 'false' }}"
+          - condition: template
+            value_template: "{{ boiler_running }}"
         sequence:
           - service: switch.turn_off
             target:
@@ -352,10 +340,10 @@ action:
             data:
               name: "Solar Water Heater Control"
               message: >
-                Boiler ausgeschaltet - Temp: {{ states(water_heater_temp) }}°C, 
-                Solar: {{ states(solar_forecast_sensor) }}W, 
-                Verbrauch: {{ states(house_consumption) }}W, 
-                Batterie: {{ states(battery_soc) }}%
+                Boiler ausgeschaltet - Temp: {{ states(water_temp) }}°C, 
+                Solar: {{ states(solar_forecast) }}W,
+                Überschuss: {{ solar_surplus }}W,
+                Grund: {% if force_off_max_time %}Maximale Laufzeit erreicht{% else %}Bedingungen nicht erfüllt{% endif %}
 
 mode: single
 max_exceeded: silent
